@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tickets_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tickets_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tickets_local_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-tickets_core}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-tickets_admin} -d $${POSTGRES_DB:-tickets_core}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tickets_net
+
+  core-tickets:
+    build:
+      context: ./modules/core_tickets
+      dockerfile: Dockerfile
+    container_name: tickets_core_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tickets_admin}:${POSTGRES_PASSWORD:-tickets_local_dev}@db:5432/${POSTGRES_DB:-tickets_core}
+      BITACORAS_DIR: /data/bitacoras
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./modules/core_tickets/app:/app/app
+      - ./bitacoras:/data/bitacoras
+    networks:
+      - tickets_net
+
+volumes:
+  postgres_data:
+
+networks:
+  tickets_net:
+    driver: bridge

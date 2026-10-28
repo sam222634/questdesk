@@ -1,0 +1,22 @@
+# Variables de entorno y secretos
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Datos persistentes de contenedores (cuando se montan localmente)
+.postgres_data/
+
+# Archivos temporales del sistema e IDE
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
