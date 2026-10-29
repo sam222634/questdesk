@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tickets_local_dev}
       POSTGRES_DB: ${POSTGRES_DB:-tickets_core}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database:/docker-entrypoint-initdb.d:ro
@@ -18,7 +18,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - tickets_net
+      - backend_db_net
 
   core-tickets:
     build:
@@ -33,16 +33,36 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-tickets_admin}:${POSTGRES_PASSWORD:-tickets_local_dev}@db:5432/${POSTGRES_DB:-tickets_core}
       BITACORAS_DIR: /data/bitacoras
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
       - ./modules/core_tickets/app:/app/app
       - ./bitacoras:/data/bitacoras
     networks:
-      - tickets_net
+      - backend_db_net
+      - frontend_net
+
+  web-ui:
+    build:
+      context: ./modules/web_ui
+      dockerfile: Dockerfile
+    container_name: tickets_web_ui
+    restart: unless-stopped
+    depends_on:
+      - core-tickets
+    environment:
+      CORE_API_URL: http://core-tickets:8000/api/v1
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    volumes:
+      - ./modules/web_ui/public:/var/www/html:ro
+    networks:
+      - frontend_net
 
 volumes:
   postgres_data:
 
 networks:
-  tickets_net:
+  backend_db_net:
+    driver: bridge
+  frontend_net:
     driver: bridge
