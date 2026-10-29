@@ -1,13 +1,31 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from app.config import settings
+from app.repositories import RepositoryError
 from app.routers import catalogs, tickets
 
 app = FastAPI(
     title=settings.app_title,
     version=settings.app_version,
-    description="Módulo 1: Gestor de Tickets Normalizado con generación de Bitácoras Markdown.",
+    description="Módulo 1: Gestor de Tickets Normalizado con Patrón Repositorio y Transacciones ACID.",
 )
+
+
+@app.exception_handler(RepositoryError)
+async def repository_error_handler(_request: Request, exc: RepositoryError):
+    """
+    Si falla cualquier paso intermedio de una transacción, tras el ROLLBACK
+    devuelve un JSON estructurado indicando qué paso falló y por qué, sin tumbar el servicio.
+    """
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "ok": False,
+            "failed_step": exc.step,
+            "detail": exc.message,
+        },
+    )
+
 
 app.include_router(catalogs.router)
 app.include_router(tickets.router)
@@ -20,7 +38,7 @@ def healthcheck():
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def web_dashboard():
-    """Panel web ligero local para visualizar, crear y cambiar el estado de tickets desde PC o móvil."""
+    """Panel web ligero local con sanitización XSS y manejo de errores transaccionales."""
     return """<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -35,8 +53,6 @@ def web_dashboard():
       --text: #f8fafc;
       --muted: #94a3b8;
       --accent: #38bdf8;
-      --success: #22c55e;
-      --warn: #f59e0b;
       --danger: #ef4444;
     }
     * { box-sizing: border-box; }
@@ -100,6 +116,16 @@ def web_dashboard():
       padding: 0.35rem 0.65rem;
       font-size: 0.8rem;
     }
+    .alert {
+      display: none;
+      background: rgba(239,68,68,0.15);
+      border: 1px solid var(--danger);
+      color: #fca5a5;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+      font-size: 0.85rem;
+    }
     .tickets-grid { display: flex; flex-direction: column; gap: 0.8rem; }
     .ticket-row {
       display: flex;
@@ -132,13 +158,15 @@ def web_dashboard():
   <header>
     <div>
       <h1>QuestDesk — Módulo 1: Core de Tickets</h1>
-      <div class="subtitle">PostgreSQL Normalizado + Bitácoras Markdown Automáticas</div>
+      <div class="subtitle">PostgreSQL Normalizado + Patrón Repositorio + Bitácoras Markdown</div>
     </div>
     <div class="actions">
       <label style="margin:0"><input type="checkbox" id="showClosed" style="width:auto" onchange="loadTickets()"> Ver resueltos</label>
       <a href="/docs" style="color:var(--accent);font-size:0.85rem;margin-left:1rem;">API Docs (Swagger)</a>
     </div>
   </header>
+
+  <div id="errorBox" class="alert"></div>
 
   <div class="layout">
     <div class="card">
@@ -180,38 +208,66 @@ def web_dashboard():
   </div>
 
   <script>
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function showError(msg) {
+      const box = document.getElementById('errorBox');
+      if (!msg) {
+        box.style.display = 'none';
+        box.textContent = '';
+        return;
+      }
+      box.textContent = msg;
+      box.style.display = 'block';
+    }
+
     async function loadTickets() {
       const includeClosed = document.getElementById('showClosed').checked;
       const res = await fetch(`/api/v1/tickets?include_closed=${includeClosed}`);
       const tickets = await res.json();
       const container = document.getElementById('ticketsList');
-      if (!tickets.length) {
+      if (!Array.isArray(tickets) || !tickets.length) {
         container.innerHTML = '<div class="subtitle">No hay tickets activos en este momento.</div>';
         return;
       }
-      container.innerHTML = tickets.map(t => `
+      container.innerHTML = tickets.map(t => {
+        const code = escapeHtml(t.ticket_code);
+        const title = escapeHtml(t.title);
+        const prio = escapeHtml(t.priority_name);
+        const status = escapeHtml(t.status_name);
+        const queue = escapeHtml(t.queue_name);
+        const uri = escapeHtml(t.bitacora_uri || '');
+        return `
         <div class="ticket-row">
           <div>
             <div>
-              <span class="code">${t.ticket_code}</span>
-              <strong style="margin-left:0.4rem">${t.title}</strong>
-              <span class="badge prio-${t.priority_name}">${t.priority_name}</span>
-              <span class="badge">${t.status_name}</span>
+              <span class="code">${code}</span>
+              <strong style="margin-left:0.4rem">${title}</strong>
+              <span class="badge prio-${prio}">${prio}</span>
+              <span class="badge">${status}</span>
             </div>
             <div class="meta">
-              Área: ${t.queue_name} · Esfuerzo: ${t.estimated_points} pts · Tiempo: ${t.total_minutes} min · Bitácora: <code>${t.bitacora_uri || ''}</code>
+              Área: ${queue} · Esfuerzo: ${Number(t.estimated_points)} pts · Tiempo: ${Number(t.total_minutes)} min · Bitácora: <code>${uri}</code>
             </div>
           </div>
           <div class="actions">
-            ${t.status_name !== 'IN_PROGRESS' && !t.is_closed ? `<button class="secondary" onclick="setStatus('${t.ticket_code}', 'IN_PROGRESS')">Iniciar Foco</button>` : ''}
-            ${!t.is_closed ? `<button class="secondary" onclick="setStatus('${t.ticket_code}', 'RESOLVED')">Resolver</button>` : ''}
+            ${t.status_name !== 'IN_PROGRESS' && !t.is_closed ? `<button class="secondary" onclick="setStatus('${code}', 'IN_PROGRESS')">Iniciar Foco</button>` : ''}
+            ${!t.is_closed ? `<button class="secondary" onclick="setStatus('${code}', 'RESOLVED')">Resolver</button>` : ''}
           </div>
-        </div>
-      `).join('');
+        </div>`;
+      }).join('');
     }
 
     async function createTicket(e) {
       e.preventDefault();
+      showError(null);
       const payload = {
         title: document.getElementById('title').value,
         description: document.getElementById('description').value,
@@ -228,15 +284,23 @@ def web_dashboard():
       if (res.ok) {
         document.getElementById('ticketForm').reset();
         loadTickets();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showError(`Transacción revertida en paso [${err.failed_step || 'validación'}]: ${err.detail || 'Error al procesar solicitud'}`);
       }
     }
 
     async function setStatus(code, status_name) {
-      await fetch(`/api/v1/tickets/${code}/status`, {
+      showError(null);
+      const res = await fetch(`/api/v1/tickets/${encodeURIComponent(code)}/status`, {
         method: 'PATCH',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ status_name, actor: 'web_ui' })
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showError(`Transacción revertida en paso [${err.failed_step || 'estado'}]: ${err.detail || 'No se pudo cambiar el estado'}`);
+      }
       loadTickets();
     }
 

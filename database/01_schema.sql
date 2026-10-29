@@ -99,6 +99,19 @@ CREATE INDEX IF NOT EXISTS idx_work_logs_ticket ON ticket_work_logs(ticket_id);
 -- ============================================================================
 -- Triggers: Actualización de timestamps y Bus de Eventos nativo (pg_notify)
 -- ============================================================================
+CREATE OR REPLACE FUNCTION set_ticket_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_tickets_updated_at ON tickets;
+CREATE TRIGGER trg_tickets_updated_at
+BEFORE UPDATE ON tickets
+FOR EACH ROW EXECUTE FUNCTION set_ticket_updated_at();
+
 CREATE OR REPLACE FUNCTION notify_ticket_event()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -108,7 +121,6 @@ BEGIN
     IF TG_OP = 'INSERT' THEN
         event_name := 'ticket.created';
     ELSIF TG_OP = 'UPDATE' THEN
-        NEW.updated_at := NOW();
         IF OLD.status_id IS DISTINCT FROM NEW.status_id THEN
             event_name := 'ticket.status_changed';
         ELSE
@@ -134,7 +146,7 @@ $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_ticket_events ON tickets;
 CREATE TRIGGER trg_ticket_events
-BEFORE UPDATE OR AFTER INSERT ON tickets
+AFTER INSERT OR UPDATE ON tickets
 FOR EACH ROW EXECUTE FUNCTION notify_ticket_event();
 
 -- ============================================================================

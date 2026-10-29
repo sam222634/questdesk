@@ -6,15 +6,10 @@ from app.config import settings
 
 
 @contextmanager
-def get_db_cursor(commit: bool = False) -> Generator[psycopg.Cursor, None, None]:
+def get_db_connection() -> Generator[psycopg.Connection, None, None]:
+    """Provee una conexión a PostgreSQL con dict_row y cierre garantizado."""
     conn = psycopg.connect(settings.database_url, row_factory=dict_row)
     try:
-        with conn.cursor() as cur:
-            yield cur
-            if commit:
-                conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+        yield conn
     finally:
         conn.close()
