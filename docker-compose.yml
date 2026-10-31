@@ -53,7 +53,7 @@ services:
       CORE_API_URL: http://core-tickets:8000/api/v1
       CORE_API_KEY: ${DEFAULT_API_KEY:-questdesk-local-dev-key}
     ports:
-      - "${WEB_PORT:-8080}:8080"
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
     volumes:
       - ./modules/web_ui/public:/var/www/html:ro
     networks:

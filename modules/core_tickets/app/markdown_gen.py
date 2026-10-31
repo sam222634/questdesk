@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import re
 from app.config import settings
 
 
@@ -14,7 +15,6 @@ def generate_bitacora_markdown(
     channel: str,
     sender_email: Optional[str] = None,
 ) -> str:
-    """Crea la plantilla Markdown inicial para la bitácora del ticket y devuelve su URI relativa."""
     target_dir: Path = settings.bitacoras_dir
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -57,3 +57,19 @@ _Pendiente de documentar al resolver el ticket._
         file_path.write_text(content, encoding="utf-8")
 
     return f"bitacoras/{file_name}"
+
+
+def update_bitacora_status(ticket_code: str, new_status: str) -> None:
+    file_path = settings.bitacoras_dir / f"{ticket_code}.md"
+    if not file_path.exists():
+        return
+
+    content = file_path.read_text(encoding="utf-8")
+    updated = re.sub(
+        r"(?m)^status:\s*\S+$",
+        f"status: {new_status}",
+        content,
+        count=1,
+    )
+    if updated != content:
+        file_path.write_text(updated, encoding="utf-8")

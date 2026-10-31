@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 import json
 import psycopg
 from app.database import get_db_connection
-from app.markdown_gen import generate_bitacora_markdown
+from app.markdown_gen import generate_bitacora_markdown, update_bitacora_status
 from app.repositories.base import (
     AbstractTicketRepository,
     ConflictError,
@@ -20,6 +20,12 @@ from app.schemas import (
     TicketStatusUpdate,
     WorkLogCreate,
 )
+
+_INTERNAL_TICKET_KEYS = {"id", "assigned_user_id", "assignee_manager_id", "queue_id", "status_id", "priority_id"}
+
+
+def _sanitize_ticket_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in row.items() if k not in _INTERNAL_TICKET_KEYS}
 
 
 def _translate_pg_error(exc: psycopg.Error, step: str) -> RepositoryError:
@@ -52,13 +58,13 @@ class PostgresTicketRepository(AbstractTicketRepository):
 
     def get_catalogs(self, requester: AuthenticatedUser) -> Dict[str, List[Dict[str, Any]]]:
         with get_db_connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT id, slug, prefix, name, description, is_active FROM ticket_queues ORDER BY id")
+            cur.execute("SELECT slug, prefix, name, description, is_active FROM ticket_queues ORDER BY id")
             queues = cur.fetchall()
 
-            cur.execute("SELECT id, name, is_closed, sort_order FROM ticket_statuses ORDER BY sort_order")
+            cur.execute("SELECT name, is_closed, sort_order FROM ticket_statuses ORDER BY sort_order")
             statuses = cur.fetchall()
 
-            cur.execute("SELECT id, name, weight FROM ticket_priorities ORDER BY weight")
+            cur.execute("SELECT name, weight FROM ticket_priorities ORDER BY weight")
             priorities = cur.fetchall()
 
             if requester.role.upper() == "ADMIN":
@@ -120,7 +126,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
         """
         with get_db_connection() as conn, conn.cursor() as cur:
             cur.execute(query, params)
-            return cur.fetchall()
+            return [_sanitize_ticket_row(r) for r in cur.fetchall()]
 
     def get_ticket_detail(self, ticket_code: str, requester: AuthenticatedUser) -> Dict[str, Any]:
         current_step = "get_ticket_detail"
@@ -141,20 +147,32 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 )
 
                 tid = ticket["id"]
-                cur.execute("SELECT * FROM ticket_sources WHERE ticket_id = %s", (tid,))
+                cur.execute(
+                    "SELECT channel, sender_email, message_id, raw_headers, created_at FROM ticket_sources WHERE ticket_id = %s",
+                    (tid,),
+                )
                 source = cur.fetchone()
 
-                cur.execute("SELECT * FROM ticket_documents WHERE ticket_id = %s ORDER BY created_at", (tid,))
+                cur.execute(
+                    "SELECT doc_type, uri, sync_status, created_at FROM ticket_documents WHERE ticket_id = %s ORDER BY created_at",
+                    (tid,),
+                )
                 documents = cur.fetchall()
 
-                cur.execute("SELECT * FROM ticket_work_logs WHERE ticket_id = %s ORDER BY started_at DESC", (tid,))
+                cur.execute(
+                    "SELECT started_at, ended_at, duration_minutes, notes FROM ticket_work_logs WHERE ticket_id = %s ORDER BY started_at DESC",
+                    (tid,),
+                )
                 work_logs = cur.fetchall()
 
-                cur.execute("SELECT * FROM ticket_audit_log WHERE ticket_id = %s ORDER BY created_at DESC", (tid,))
+                cur.execute(
+                    "SELECT action, old_value, new_value, actor, created_at FROM ticket_audit_log WHERE ticket_id = %s ORDER BY created_at DESC",
+                    (tid,),
+                )
                 audit_logs = cur.fetchall()
 
             return {
-                **ticket,
+                **_sanitize_ticket_row(ticket),
                 "source": source,
                 "documents": documents,
                 "work_logs": work_logs,
@@ -169,7 +187,12 @@ class PostgresTicketRepository(AbstractTicketRepository):
             with get_db_connection() as conn:
                 with conn.transaction():
                     with conn.cursor() as cur:
+                        if payload.message_id:
+                            current_step = "fn_assert_unique_message_id"
+                            cur.execute("SELECT fn_assert_unique_message_id(%s)", (payload.message_id,))
+
                         assigned_user_id = requester.user_id
+                        assigned_user_uuid = str(requester.user_uuid)
                         assigned_display_name = requester.display_name
                         if payload.assignee_uuid:
                             current_step = "fn_get_user_by_uuid"
@@ -185,6 +208,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
                                     step="check_assignee_hierarchy",
                                 )
                             assigned_user_id = target_user["user_id"]
+                            assigned_user_uuid = str(target_user["user_uuid"])
                             assigned_display_name = target_user["display_name"]
 
                         current_step = "fn_get_priority"
@@ -245,7 +269,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
                                     {
                                         "status": status["status_name"],
                                         "priority": prio["priority_name"],
-                                        "assigned_user_id": assigned_user_id,
+                                        "assignee_uuid": assigned_user_uuid,
                                         "channel": payload.channel.upper(),
                                     }
                                 ),
@@ -253,7 +277,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             ),
                         )
 
-                        # Si la escritura del archivo .md falla en disco, el bloque conn.transaction() revierte SQL
+                        # Si la escritura del archivo .md falla en disco, conn.transaction() revierte SQL
                         current_step = "generate_bitacora_markdown"
                         generate_bitacora_markdown(
                             ticket_code=ticket_code,
@@ -267,11 +291,12 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         )
 
                 return {
-                    **ticket,
+                    **_sanitize_ticket_row(ticket),
                     "queue_slug": queue["queue_slug"],
                     "queue_name": queue["queue_name"],
                     "status_name": status["status_name"],
                     "priority_name": prio["priority_name"],
+                    "assignee_uuid": assigned_user_uuid,
                     "assignee_display_name": assigned_display_name,
                     "bitacora_uri": bitacora_uri,
                 }
@@ -338,6 +363,9 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             ),
                         )
 
+                        current_step = "update_bitacora_status"
+                        update_bitacora_status(locked["ticket_code"], new_status["status_name"])
+
                 return {
                     "ticket_code": locked["ticket_code"],
                     "previous_status": locked["current_status"],
@@ -345,6 +373,12 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 }
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
+        except OSError as exc:
+            raise RepositoryError(
+                message=f"No se pudo actualizar el estado en el archivo Markdown: {exc}",
+                step=current_step,
+                status_code=500,
+            ) from exc
 
     def assign_ticket(
         self,
@@ -392,10 +426,10 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             "SELECT fn_insert_audit(%s, 'ASSIGNED', %s, %s, %s)",
                             (
                                 locked["ticket_id"],
-                                json.dumps({"assigned_user_id": locked["assigned_user_id"]}),
+                                json.dumps({"previous_assignee": True}),
                                 json.dumps(
                                     {
-                                        "assigned_user_id": target_user["user_id"],
+                                        "assignee_uuid": str(target_user["user_uuid"]),
                                         "assignee_username": target_user["username"],
                                         "notes": payload.notes,
                                     }
@@ -449,8 +483,6 @@ class PostgresTicketRepository(AbstractTicketRepository):
                                 locked["ticket_id"],
                                 json.dumps(
                                     {
-                                        "work_log_id": log_row["id"],
-                                        "user_id": requester.user_id,
                                         "duration_minutes": log_row["duration_minutes"],
                                         "notes": payload.notes,
                                     }
@@ -459,7 +491,12 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             ),
                         )
 
-                return log_row
+                return {
+                    "started_at": log_row["started_at"],
+                    "ended_at": log_row["ended_at"],
+                    "duration_minutes": log_row["duration_minutes"],
+                    "notes": log_row["notes"],
+                }
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
 

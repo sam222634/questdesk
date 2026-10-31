@@ -257,7 +257,24 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- 2.2 Insertar fila únicamente en ticket_sources (con validación de Message-ID duplicado)
+-- 2.2 Validar anticipadamente que un Message-ID no esté duplicado antes de reservar folio
+CREATE OR REPLACE FUNCTION fn_assert_unique_message_id(p_message_id VARCHAR(255) DEFAULT NULL)
+RETURNS VOID AS $$
+DECLARE
+    v_clean_msg_id VARCHAR(255);
+BEGIN
+    v_clean_msg_id := NULLIF(BTRIM(p_message_id), '');
+
+    IF v_clean_msg_id IS NOT NULL THEN
+        IF EXISTS (SELECT 1 FROM ticket_sources ts WHERE ts.message_id = v_clean_msg_id) THEN
+            RAISE EXCEPTION 'El correo con Message-ID "%" ya fue registrado previamente.', v_clean_msg_id
+                USING ERRCODE = 'unique_violation';
+        END IF;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 2.3 Insertar fila únicamente en ticket_sources
 CREATE OR REPLACE FUNCTION fn_insert_source(
     p_ticket_id BIGINT,
     p_channel VARCHAR(30),
@@ -271,13 +288,7 @@ DECLARE
     v_clean_msg_id VARCHAR(255);
 BEGIN
     v_clean_msg_id := NULLIF(BTRIM(p_message_id), '');
-
-    IF v_clean_msg_id IS NOT NULL THEN
-        IF EXISTS (SELECT 1 FROM ticket_sources ts WHERE ts.message_id = v_clean_msg_id) THEN
-            RAISE EXCEPTION 'El correo con Message-ID "%" ya fue registrado previamente.', v_clean_msg_id
-                USING ERRCODE = 'unique_violation';
-        END IF;
-    END IF;
+    PERFORM fn_assert_unique_message_id(v_clean_msg_id);
 
     INSERT INTO ticket_sources (ticket_id, channel, sender_email, message_id, raw_headers)
     VALUES (p_ticket_id, UPPER(BTRIM(p_channel)), p_sender_email, v_clean_msg_id, p_raw_headers)
