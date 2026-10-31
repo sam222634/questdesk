@@ -1,4 +1,7 @@
-FROM php:8.3-cli-alpine
+FROM php:8.4-cli-alpine
+
+# Aplicar todos los parches de seguridad más recientes de Alpine y PHP
+RUN apk update && apk upgrade --no-cache
 
 WORKDIR /var/www/html
 
