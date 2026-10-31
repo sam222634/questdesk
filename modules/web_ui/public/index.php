@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * QuestDesk - Módulo Web UI (PHP 8.3)
+ * QuestDesk - Módulo Web UI (PHP 8.5)
  * Sin acceso directo a base de datos ni credenciales SQL.
  * Se comunica exclusivamente con el intermediario Python mediante HTTP interno.
  */
@@ -15,7 +15,7 @@ if (isset($_GET['api'])) {
     $endpoint = (string) $_GET['api'];
 
     // Lista blanca estricta de rutas permitidas hacia el intermediario
-    if (!preg_match('#^/(tickets(?:/[A-Za-z0-9_-]+/status)?|catalogs)$#', $endpoint)) {
+    if (!preg_match('#^/(tickets(?:/[A-Za-z0-9_-]+(?:/(?:status|assign))?)?|catalogs)$#', $endpoint)) {
         http_response_code(400);
         echo json_encode(['ok' => false, 'failed_step' => 'web_proxy', 'detail' => 'Ruta de API no permitida.']);
         exit;
@@ -29,10 +29,18 @@ if (isset($_GET['api'])) {
     $targetUrl = $apiBase . $endpoint . $queryString;
     $rawBody = file_get_contents('php://input');
 
+    $headers = [
+        'Content-Type: application/json',
+        'Accept: application/json',
+    ];
+    if (!empty($_SERVER['HTTP_X_API_KEY'])) {
+        $headers[] = 'X-API-Key: ' . trim((string) $_SERVER['HTTP_X_API_KEY']);
+    }
+
     $opts = [
         'http' => [
             'method' => $method,
-            'header' => "Content-Type: application/json\r\nAccept: application/json\r\n",
+            'header' => implode("\r\n", $headers) . "\r\n",
             'timeout' => 10,
             'ignore_errors' => true,
         ],

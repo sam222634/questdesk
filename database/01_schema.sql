@@ -1,8 +1,37 @@
 -- ============================================================================
--- QuestDesk - Módulo 1: Esquema Relacional Normalizado (PostgreSQL 16)
+-- QuestDesk - Módulo 1: Esquema Relacional Normalizado (PostgreSQL 17)
 -- ============================================================================
 
--- 1. Catálogo de Colas / Áreas
+-- 1. Identidad de Usuarios (Solo datos de identidad, sin credenciales ni roles)
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    user_uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+    username VARCHAR(50) UNIQUE NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
+    email VARCHAR(255) UNIQUE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 2. Credenciales de Usuario (Aisladas de la tabla de identidad; permite múltiples dispositivos)
+CREATE TABLE IF NOT EXISTS user_credentials (
+    id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_label VARCHAR(50) NOT NULL DEFAULT 'default', -- 'pc_local', 'celular_nfc', 'cli'
+    api_key_hash CHAR(64) UNIQUE NOT NULL,               -- SHA-256 en hexadecimal
+    is_revoked BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 3. Jerarquía y Roles de Usuario (Control de acceso y delegación a subordinados)
+CREATE TABLE IF NOT EXISTS user_hierarchy (
+    user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL DEFAULT 'AGENT'
+        CHECK (role IN ('ADMIN', 'SUPERVISOR', 'AGENT')),
+    manager_id INT REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- 4. Catálogo de Colas / Áreas
 CREATE TABLE IF NOT EXISTS ticket_queues (
     id SERIAL PRIMARY KEY,
     slug VARCHAR(50) UNIQUE NOT NULL,      -- 'general', 'infra', 'dev', 'personal'
@@ -13,7 +42,7 @@ CREATE TABLE IF NOT EXISTS ticket_queues (
     is_active BOOLEAN DEFAULT TRUE
 );
 
--- 2. Catálogo de Estados
+-- 5. Catálogo de Estados
 CREATE TABLE IF NOT EXISTS ticket_statuses (
     id SERIAL PRIMARY KEY,
     name VARCHAR(50) UNIQUE NOT NULL,      -- 'NEW', 'ASSIGNED', 'IN_PROGRESS', 'BLOCKED', 'RESOLVED', 'CLOSED'
@@ -21,14 +50,14 @@ CREATE TABLE IF NOT EXISTS ticket_statuses (
     sort_order INT DEFAULT 0
 );
 
--- 3. Catálogo de Prioridades
+-- 6. Catálogo de Prioridades
 CREATE TABLE IF NOT EXISTS ticket_priorities (
     id SERIAL PRIMARY KEY,
     name VARCHAR(30) UNIQUE NOT NULL,      -- 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'
     weight INT NOT NULL DEFAULT 1
 );
 
--- 4. Entidad Central: Tickets
+-- 7. Entidad Central: Tickets
 CREATE TABLE IF NOT EXISTS tickets (
     id BIGSERIAL PRIMARY KEY,
     ticket_code VARCHAR(30) UNIQUE NOT NULL, -- ej: "DEV-0001"
@@ -37,12 +66,13 @@ CREATE TABLE IF NOT EXISTS tickets (
     queue_id INT NOT NULL REFERENCES ticket_queues(id),
     status_id INT NOT NULL REFERENCES ticket_statuses(id),
     priority_id INT NOT NULL REFERENCES ticket_priorities(id),
+    assigned_user_id INT NOT NULL DEFAULT 1 REFERENCES users(id),
     estimated_points INT DEFAULT 1 CHECK (estimated_points >= 1 AND estimated_points <= 10),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Submódulo de Origen (Aislamiento de procedencia / Correo / CLI / Web)
+-- 8. Submódulo de Origen (Aislamiento de procedencia / Correo / CLI / Web)
 CREATE TABLE IF NOT EXISTS ticket_sources (
     id BIGSERIAL PRIMARY KEY,
     ticket_id BIGINT UNIQUE NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
@@ -53,10 +83,11 @@ CREATE TABLE IF NOT EXISTS ticket_sources (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 6. Submódulo de Tiempos y Cuantificación
+-- 9. Submódulo de Tiempos y Cuantificación (Registra también qué usuario trabajó la sesión)
 CREATE TABLE IF NOT EXISTS ticket_work_logs (
     id BIGSERIAL PRIMARY KEY,
     ticket_id BIGINT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    user_id INT NOT NULL DEFAULT 1 REFERENCES users(id),
     started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMP WITH TIME ZONE,
     duration_minutes INT GENERATED ALWAYS AS (
@@ -68,7 +99,7 @@ CREATE TABLE IF NOT EXISTS ticket_work_logs (
     notes TEXT
 );
 
--- 7. Submódulo de Documentos y Bitácora Markdown
+-- 10. Submódulo de Documentos y Bitácora Markdown
 CREATE TABLE IF NOT EXISTS ticket_documents (
     id BIGSERIAL PRIMARY KEY,
     ticket_id BIGINT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
@@ -79,11 +110,11 @@ CREATE TABLE IF NOT EXISTS ticket_documents (
     UNIQUE (ticket_id, uri)
 );
 
--- 8. Trazabilidad e Historial Inmutable (Auditoría)
+-- 11. Trazabilidad e Historial Inmutable (Auditoría)
 CREATE TABLE IF NOT EXISTS ticket_audit_log (
     id BIGSERIAL PRIMARY KEY,
     ticket_id BIGINT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
-    action VARCHAR(50) NOT NULL,           -- 'CREATED', 'STATUS_CHANGED', 'PRIORITY_CHANGED', 'TIME_LOGGED'
+    action VARCHAR(50) NOT NULL,           -- 'CREATED', 'STATUS_CHANGED', 'ASSIGNED', 'TIME_LOGGED'
     old_value JSONB,
     new_value JSONB,
     actor VARCHAR(100) DEFAULT 'system',
@@ -93,8 +124,10 @@ CREATE TABLE IF NOT EXISTS ticket_audit_log (
 -- Índices
 CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_queue ON tickets(queue_id);
+CREATE INDEX IF NOT EXISTS idx_tickets_assigned_user ON tickets(assigned_user_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_code ON tickets(ticket_code);
 CREATE INDEX IF NOT EXISTS idx_work_logs_ticket ON ticket_work_logs(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_user_hierarchy_manager ON user_hierarchy(manager_id);
 
 -- ============================================================================
 -- Triggers: Actualización de timestamps y Bus de Eventos nativo (pg_notify)
@@ -123,6 +156,8 @@ BEGIN
     ELSIF TG_OP = 'UPDATE' THEN
         IF OLD.status_id IS DISTINCT FROM NEW.status_id THEN
             event_name := 'ticket.status_changed';
+        ELSIF OLD.assigned_user_id IS DISTINCT FROM NEW.assigned_user_id THEN
+            event_name := 'ticket.assigned';
         ELSE
             event_name := 'ticket.updated';
         END IF;
@@ -135,6 +170,7 @@ BEGIN
         'status_id', NEW.status_id,
         'queue_id', NEW.queue_id,
         'priority_id', NEW.priority_id,
+        'assigned_user_id', NEW.assigned_user_id,
         'estimated_points', NEW.estimated_points,
         'timestamp', NOW()
     );
@@ -150,8 +186,21 @@ AFTER INSERT OR UPDATE ON tickets
 FOR EACH ROW EXECUTE FUNCTION notify_ticket_event();
 
 -- ============================================================================
--- Datos Semilla Iniciales (Catálogos Base)
+-- Datos Semilla Iniciales (Usuario Local por defecto y Catálogos Base)
 -- ============================================================================
+INSERT INTO users (id, username, display_name, email) VALUES
+    (1, 'local', 'Usuario Principal', 'local@questdesk.internal')
+ON CONFLICT (username) DO NOTHING;
+
+INSERT INTO user_hierarchy (user_id, role, manager_id) VALUES
+    (1, 'ADMIN', NULL)
+ON CONFLICT (user_id) DO NOTHING;
+
+-- Hash SHA-256 de la llave local por defecto: 'questdesk-local-dev-key'
+INSERT INTO user_credentials (user_id, device_label, api_key_hash) VALUES
+    (1, 'default_local', encode(sha256('questdesk-local-dev-key'::bytea), 'hex'))
+ON CONFLICT (api_key_hash) DO NOTHING;
+
 INSERT INTO ticket_queues (slug, prefix, name, description) VALUES
     ('general', 'GEN', 'General', 'Cola general de tareas y pendientes'),
     ('infra', 'INF', 'Infraestructura y Sistemas', 'Servidores, redes, despliegues y soporte'),

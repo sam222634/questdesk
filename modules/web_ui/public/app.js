@@ -40,6 +40,7 @@ async function loadTickets() {
     const prio = escapeHtml(t.priority_name);
     const status = escapeHtml(t.status_name);
     const queue = escapeHtml(t.queue_name);
+    const assignee = escapeHtml(t.assignee_display_name || 'Usuario Principal');
     const uri = escapeHtml(t.bitacora_uri || '');
 
     return `
@@ -52,7 +53,7 @@ async function loadTickets() {
             <span class="badge">${status}</span>
           </div>
           <div class="meta">
-            Área: ${queue} · Esfuerzo: ${Number(t.estimated_points)} pts · Tiempo: ${Number(t.total_minutes)} min · Bitácora: <code>${uri}</code>
+            Responsable: ${assignee} · Área: ${queue} · Esfuerzo: ${Number(t.estimated_points)} pts · Tiempo: ${Number(t.total_minutes)} min · Bitácora: <code>${uri}</code>
           </div>
         </div>
         <div class="actions">
@@ -95,7 +96,7 @@ async function setStatus(code, status_name) {
   const res = await fetch(`/?api=/tickets/${encodeURIComponent(code)}/status`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status_name, actor: 'web_ui' })
+    body: JSON.stringify({ status_name })
   });
 
   if (!res.ok) {

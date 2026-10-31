@@ -1,6 +1,15 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
+from uuid import UUID
 from pydantic import BaseModel, Field
+
+
+class AuthenticatedUser(BaseModel):
+    user_id: int
+    user_uuid: UUID
+    username: str
+    display_name: str
+    role: str
 
 
 class TicketCreate(BaseModel):
@@ -9,6 +18,10 @@ class TicketCreate(BaseModel):
     queue_slug: str = Field(default="general")
     priority_name: str = Field(default="MEDIUM")
     estimated_points: int = Field(default=1, ge=1, le=10)
+    assignee_uuid: Optional[UUID] = Field(
+        default=None,
+        description="UUID opaco del usuario responsable (si se omite, se asigna al solicitante actual)",
+    )
     channel: str = Field(default="API")
     sender_email: Optional[str] = None
     message_id: Optional[str] = None
@@ -23,12 +36,17 @@ class EmailWebhookPayload(BaseModel):
     queue_slug: str = Field(default="general")
     priority_name: str = Field(default="MEDIUM")
     estimated_points: int = Field(default=1, ge=1, le=10)
+    assignee_uuid: Optional[UUID] = None
     headers: Optional[Dict[str, Any]] = None
 
 
 class TicketStatusUpdate(BaseModel):
     status_name: str = Field(..., description="NEW, ASSIGNED, IN_PROGRESS, BLOCKED, RESOLVED, CLOSED")
-    actor: str = Field(default="user")
+    notes: Optional[str] = None
+
+
+class TicketAssignUpdate(BaseModel):
+    target_user_uuid: UUID = Field(..., description="UUID opaco del compañero o subordinado al que se delega")
     notes: Optional[str] = None
 
 
@@ -36,20 +54,3 @@ class WorkLogCreate(BaseModel):
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     notes: Optional[str] = None
-
-
-class TicketSummaryResponse(BaseModel):
-    id: int
-    ticket_code: str
-    title: str
-    queue_slug: str
-    queue_name: str
-    status_name: str
-    is_closed: bool
-    priority_name: str
-    priority_weight: int
-    estimated_points: int
-    total_minutes: int
-    bitacora_uri: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
