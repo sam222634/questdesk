@@ -23,29 +23,23 @@ from app.schemas import (
 
 
 def _translate_pg_error(exc: psycopg.Error, step: str) -> RepositoryError:
-    """Convierte errores de PostgreSQL en errores controlados indicando el paso exacto que falló."""
     diag_msg = (exc.diag.message_primary if exc.diag and exc.diag.message_primary else str(exc)).strip()
     sqlstate = getattr(exc, "sqlstate", None)
 
-    if sqlstate == "28000":  # invalid_authorization_specification
+    if sqlstate == "28000":
         return UnauthorizedError(message=diag_msg, step=step)
-    if sqlstate == "42501":  # insufficient_privilege
+    if sqlstate == "42501":
         return ForbiddenError(message=diag_msg, step=step)
-    if sqlstate == "23505":  # unique_violation
+    if sqlstate == "23505":
         return ConflictError(message=diag_msg, step=step)
-    if sqlstate == "P0002":  # no_data_found
+    if sqlstate == "P0002":
         return NotFoundError(message=diag_msg, step=step)
-    if sqlstate in ("22023", "23514", "23503"):  # invalid_parameter_value / check / fk
+    if sqlstate in ("22023", "23514", "23503"):
         return ValidationError(message=diag_msg, step=step)
     return RepositoryError(message=diag_msg, step=step, status_code=400)
 
 
 class PostgresTicketRepository(AbstractTicketRepository):
-    """
-    Implementación para PostgreSQL que invoca funciones pequeñas especializadas
-    dentro de bloques transaccionales explícitos (with conn.transaction():).
-    """
-
     def authenticate_by_key_hash(self, api_key_hash: str) -> AuthenticatedUser:
         current_step = "fn_authenticate_by_key_hash"
         try:
@@ -56,7 +50,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
 
-    def get_catalogs(self) -> Dict[str, List[Dict[str, Any]]]:
+    def get_catalogs(self, requester: AuthenticatedUser) -> Dict[str, List[Dict[str, Any]]]:
         with get_db_connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT id, slug, prefix, name, description, is_active FROM ticket_queues ORDER BY id")
             queues = cur.fetchall()
@@ -67,15 +61,28 @@ class PostgresTicketRepository(AbstractTicketRepository):
             cur.execute("SELECT id, name, weight FROM ticket_priorities ORDER BY weight")
             priorities = cur.fetchall()
 
-            cur.execute(
-                """
-                SELECT u.user_uuid, u.username, u.display_name, COALESCE(uh.role, 'AGENT') AS role
-                FROM users u
-                LEFT JOIN user_hierarchy uh ON uh.user_id = u.id
-                WHERE u.is_active = TRUE
-                ORDER BY u.display_name
-                """
-            )
+            if requester.role.upper() == "ADMIN":
+                cur.execute(
+                    """
+                    SELECT u.user_uuid, u.username, u.display_name, COALESCE(uh.role, 'AGENT') AS role
+                    FROM users u
+                    LEFT JOIN user_hierarchy uh ON uh.user_id = u.id
+                    WHERE u.is_active = TRUE
+                    ORDER BY u.display_name
+                    """
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT u.user_uuid, u.username, u.display_name, COALESCE(uh.role, 'AGENT') AS role
+                    FROM users u
+                    LEFT JOIN user_hierarchy uh ON uh.user_id = u.id
+                    WHERE u.is_active = TRUE
+                      AND (u.id = %s OR uh.manager_id = %s)
+                    ORDER BY u.display_name
+                    """,
+                    (requester.user_id, requester.user_id),
+                )
             users = cur.fetchall()
 
         return {"queues": queues, "statuses": statuses, "priorities": priorities, "users": users}
@@ -90,7 +97,6 @@ class PostgresTicketRepository(AbstractTicketRepository):
         conditions: List[str] = []
         params: List[Any] = []
 
-        # Control de acceso por rol: si no es ADMIN, solo ve sus tickets o los de sus subordinados directos
         if requester.role.upper() != "ADMIN":
             conditions.append("(assigned_user_id = %s OR assignee_manager_id = %s)")
             params.extend([requester.user_id, requester.user_id])
@@ -128,7 +134,6 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 if not ticket:
                     raise NotFoundError(f"El ticket '{ticket_code}' no fue encontrado.", step=current_step)
 
-                # Verificar permiso de lectura (Propio, Subordinado o ADMIN)
                 current_step = "fn_assert_ticket_access"
                 cur.execute(
                     "SELECT fn_assert_ticket_access(%s, %s, %s)",
@@ -164,27 +169,32 @@ class PostgresTicketRepository(AbstractTicketRepository):
             with get_db_connection() as conn:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        # Paso 1: Resolver usuario asignado (por UUID opaco o el propio solicitante)
                         assigned_user_id = requester.user_id
                         assigned_display_name = requester.display_name
                         if payload.assignee_uuid:
                             current_step = "fn_get_user_by_uuid"
                             cur.execute("SELECT * FROM fn_get_user_by_uuid(%s)", (payload.assignee_uuid,))
                             target_user = cur.fetchone()
+                            if (
+                                requester.role.upper() != "ADMIN"
+                                and target_user["user_id"] != requester.user_id
+                                and target_user["manager_id"] != requester.user_id
+                            ):
+                                raise ForbiddenError(
+                                    "No tienes permisos para asignar tickets a usuarios fuera de tu supervisión.",
+                                    step="check_assignee_hierarchy",
+                                )
                             assigned_user_id = target_user["user_id"]
                             assigned_display_name = target_user["display_name"]
 
-                        # Paso 2: Validar prioridad
                         current_step = "fn_get_priority"
                         cur.execute("SELECT * FROM fn_get_priority(%s)", (payload.priority_name,))
                         prio = cur.fetchone()
 
-                        # Paso 3: Obtener estado inicial NEW
                         current_step = "fn_get_status"
                         cur.execute("SELECT * FROM fn_get_status('NEW')")
                         status = cur.fetchone()
 
-                        # Paso 4: Reservar folio en la cola
                         current_step = "fn_reserve_queue_folio"
                         cur.execute("SELECT * FROM fn_reserve_queue_folio(%s)", (payload.queue_slug,))
                         queue = cur.fetchone()
@@ -192,7 +202,6 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         ticket_code = queue["ticket_code"]
                         bitacora_uri = f"bitacoras/{ticket_code}.md"
 
-                        # Paso 5: Insertar fila en tickets
                         current_step = "fn_insert_ticket"
                         cur.execute(
                             "SELECT * FROM fn_insert_ticket(%s, %s, %s, %s, %s, %s, %s, %s)",
@@ -209,7 +218,6 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         )
                         ticket = cur.fetchone()
 
-                        # Paso 6: Insertar origen en ticket_sources
                         current_step = "fn_insert_source"
                         cur.execute(
                             "SELECT fn_insert_source(%s, %s, %s, %s, %s)",
@@ -222,14 +230,12 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             ),
                         )
 
-                        # Paso 7: Insertar vínculo de documento en ticket_documents
                         current_step = "fn_insert_document"
                         cur.execute(
                             "SELECT fn_insert_document(%s, 'MARKDOWN_BITACORA', %s, 'SYNCED')",
                             (ticket["id"], bitacora_uri),
                         )
 
-                        # Paso 8: Insertar registro de auditoría en ticket_audit_log
                         current_step = "fn_insert_audit"
                         cur.execute(
                             "SELECT fn_insert_audit(%s, 'CREATED', NULL, %s, %s)",
@@ -247,7 +253,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             ),
                         )
 
-                        # Paso 9: Crear archivo físico .md (si falla en disco, revierte toda la transacción SQL)
+                        # Si la escritura del archivo .md falla en disco, el bloque conn.transaction() revierte SQL
                         current_step = "generate_bitacora_markdown"
                         generate_bitacora_markdown(
                             ticket_code=ticket_code,
@@ -289,31 +295,26 @@ class PostgresTicketRepository(AbstractTicketRepository):
             with get_db_connection() as conn:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        # Paso 1: Bloquear fila del ticket (FOR UPDATE)
                         current_step = "fn_lock_ticket_by_code"
                         cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
                         locked = cur.fetchone()
 
-                        # Paso 2: Verificar que el usuario tenga permiso sobre este ticket
                         current_step = "fn_assert_ticket_access"
                         cur.execute(
                             "SELECT fn_assert_ticket_access(%s, %s, %s)",
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 
-                        # Paso 3: Validar nuevo estado
                         current_step = "fn_get_status"
                         cur.execute("SELECT * FROM fn_get_status(%s)", (payload.status_name,))
                         new_status = cur.fetchone()
 
-                        # Paso 4: Actualizar estado en tickets
                         current_step = "fn_set_ticket_status"
                         cur.execute(
                             "SELECT fn_set_ticket_status(%s, %s)",
                             (locked["ticket_id"], new_status["status_id"]),
                         )
 
-                        # Paso 5: Sincronizar sesión de trabajo en ticket_work_logs registrando al usuario
                         current_step = "fn_sync_work_log_on_status"
                         cur.execute(
                             "SELECT fn_sync_work_log_on_status(%s, %s, %s, %s, %s)",
@@ -326,7 +327,6 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             ),
                         )
 
-                        # Paso 6: Registrar en auditoría
                         current_step = "fn_insert_audit"
                         cur.execute(
                             "SELECT fn_insert_audit(%s, 'STATUS_CHANGED', %s, %s, %s)",
@@ -357,31 +357,36 @@ class PostgresTicketRepository(AbstractTicketRepository):
             with get_db_connection() as conn:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        # Paso 1: Bloquear ticket
                         current_step = "fn_lock_ticket_by_code"
                         cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
                         locked = cur.fetchone()
 
-                        # Paso 2: Verificar que el usuario actual sea dueño del ticket, su jefe o ADMIN
                         current_step = "fn_assert_ticket_access"
                         cur.execute(
                             "SELECT fn_assert_ticket_access(%s, %s, %s)",
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 
-                        # Paso 3: Resolver destinatario por su UUID opaco
                         current_step = "fn_get_user_by_uuid"
                         cur.execute("SELECT * FROM fn_get_user_by_uuid(%s)", (payload.target_user_uuid,))
                         target_user = cur.fetchone()
 
-                        # Paso 4: Delegar ticket
+                        if (
+                            requester.role.upper() != "ADMIN"
+                            and target_user["user_id"] != requester.user_id
+                            and target_user["manager_id"] != requester.user_id
+                        ):
+                            raise ForbiddenError(
+                                "Solo puedes delegar tickets a tus subordinados directos.",
+                                step="check_delegation_hierarchy",
+                            )
+
                         current_step = "fn_set_ticket_assignee"
                         cur.execute(
                             "SELECT fn_set_ticket_assignee(%s, %s)",
                             (locked["ticket_id"], target_user["user_id"]),
                         )
 
-                        # Paso 5: Registrar delegación en auditoría
                         current_step = "fn_insert_audit"
                         cur.execute(
                             "SELECT fn_insert_audit(%s, 'ASSIGNED', %s, %s, %s)",
@@ -419,19 +424,16 @@ class PostgresTicketRepository(AbstractTicketRepository):
             with get_db_connection() as conn:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        # Paso 1: Bloquear ticket
                         current_step = "fn_lock_ticket_by_code"
                         cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
                         locked = cur.fetchone()
 
-                        # Paso 2: Verificar acceso al ticket
                         current_step = "fn_assert_ticket_access"
                         cur.execute(
                             "SELECT fn_assert_ticket_access(%s, %s, %s)",
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 
-                        # Paso 3: Insertar sesión de trabajo vinculada al usuario
                         current_step = "fn_insert_work_log"
                         started = payload.started_at or datetime.now(timezone.utc)
                         cur.execute(
@@ -440,7 +442,6 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         )
                         log_row = cur.fetchone()
 
-                        # Paso 4: Registrar en auditoría
                         current_step = "fn_insert_audit"
                         cur.execute(
                             "SELECT fn_insert_audit(%s, 'TIME_LOGGED', NULL, %s, %s)",

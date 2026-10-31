@@ -192,6 +192,8 @@ INSERT INTO users (id, username, display_name, email) VALUES
     (1, 'local', 'Usuario Principal', 'local@questdesk.internal')
 ON CONFLICT (username) DO NOTHING;
 
+SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1));
+
 INSERT INTO user_hierarchy (user_id, role, manager_id) VALUES
     (1, 'ADMIN', NULL)
 ON CONFLICT (user_id) DO NOTHING;

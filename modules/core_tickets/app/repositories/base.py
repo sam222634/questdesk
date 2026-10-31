@@ -52,7 +52,7 @@ class AbstractTicketRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_catalogs(self) -> Dict[str, List[Dict[str, Any]]]:
+    def get_catalogs(self, requester: AuthenticatedUser) -> Dict[str, List[Dict[str, Any]]]:
         raise NotImplementedError
 
     @abstractmethod

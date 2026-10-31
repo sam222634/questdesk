@@ -8,6 +8,7 @@ declare(strict_types=1);
  */
 
 $apiBase = rtrim(getenv('CORE_API_URL') ?: 'http://core-tickets:8000/api/v1', '/');
+$defaultApiKey = trim((string) (getenv('CORE_API_KEY') ?: 'questdesk-local-dev-key'));
 
 // Proxy interno para peticiones AJAX desde el navegador hacia el intermediario Python
 if (isset($_GET['api'])) {
@@ -29,13 +30,12 @@ if (isset($_GET['api'])) {
     $targetUrl = $apiBase . $endpoint . $queryString;
     $rawBody = file_get_contents('php://input');
 
+    $clientKey = !empty($_SERVER['HTTP_X_API_KEY']) ? trim((string) $_SERVER['HTTP_X_API_KEY']) : $defaultApiKey;
     $headers = [
         'Content-Type: application/json',
         'Accept: application/json',
+        'X-API-Key: ' . $clientKey,
     ];
-    if (!empty($_SERVER['HTTP_X_API_KEY'])) {
-        $headers[] = 'X-API-Key: ' . trim((string) $_SERVER['HTTP_X_API_KEY']);
-    }
 
     $opts = [
         'http' => [
