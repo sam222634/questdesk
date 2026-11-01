@@ -1,8 +1,10 @@
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.repositories import RepositoryError
 from app.routers import catalogs, tickets
+from app.schemas import AuthenticatedUser
+from app.security import get_current_user
 
 app = FastAPI(
     title=settings.app_title,
@@ -34,3 +36,13 @@ app.include_router(tickets.router)
 @app.get("/health", tags=["Sistema"])
 def healthcheck():
     return {"status": "ok", "service": "core-tickets", "version": settings.app_version}
+
+
+@app.get("/api/v1/auth/me", tags=["Autenticación"])
+def get_authenticated_profile(current_user: AuthenticatedUser = Depends(get_current_user)):
+    return {
+        "user_uuid": str(current_user.user_uuid),
+        "username": current_user.username,
+        "display_name": current_user.display_name,
+        "role": current_user.role,
+    }

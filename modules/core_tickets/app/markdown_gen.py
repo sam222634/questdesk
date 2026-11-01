@@ -73,3 +73,19 @@ def update_bitacora_status(ticket_code: str, new_status: str) -> None:
     )
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")
+
+
+def read_bitacora_markdown(ticket_code: str) -> str:
+    file_path = settings.bitacoras_dir / f"{ticket_code.upper()}.md"
+    if not file_path.exists():
+        return ""
+    return file_path.read_text(encoding="utf-8")
+
+
+def write_bitacora_markdown(ticket_code: str, content: str) -> str:
+    target_dir: Path = settings.bitacoras_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    file_name = f"{ticket_code.upper()}.md"
+    file_path = target_dir / file_name
+    file_path.write_text(content, encoding="utf-8")
+    return f"bitacoras/{file_name}"

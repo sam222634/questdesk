@@ -54,3 +54,7 @@ class WorkLogCreate(BaseModel):
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     notes: Optional[str] = None
+
+
+class BitacoraUpdate(BaseModel):
+    content: str = Field(..., min_length=1, description="Contenido Markdown completo de la bitácora")

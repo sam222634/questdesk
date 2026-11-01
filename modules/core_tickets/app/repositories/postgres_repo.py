@@ -3,7 +3,12 @@ from typing import Any, Dict, List, Optional
 import json
 import psycopg
 from app.database import get_db_connection
-from app.markdown_gen import generate_bitacora_markdown, update_bitacora_status
+from app.markdown_gen import (
+    generate_bitacora_markdown,
+    read_bitacora_markdown,
+    update_bitacora_status,
+    write_bitacora_markdown,
+)
 from app.repositories.base import (
     AbstractTicketRepository,
     ConflictError,
@@ -15,6 +20,7 @@ from app.repositories.base import (
 )
 from app.schemas import (
     AuthenticatedUser,
+    BitacoraUpdate,
     TicketAssignUpdate,
     TicketCreate,
     TicketStatusUpdate,
@@ -499,6 +505,83 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 }
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
+
+    def get_bitacora(self, ticket_code: str, requester: AuthenticatedUser) -> Dict[str, Any]:
+        current_step = "get_bitacora"
+        try:
+            with get_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, ticket_code, assigned_user_id FROM tickets WHERE UPPER(ticket_code) = UPPER(%s)",
+                    (ticket_code.strip(),),
+                )
+                ticket = cur.fetchone()
+                if not ticket:
+                    raise NotFoundError(f"El ticket '{ticket_code}' no fue encontrado.", step=current_step)
+
+                current_step = "fn_assert_ticket_access"
+                cur.execute(
+                    "SELECT fn_assert_ticket_access(%s, %s, %s)",
+                    (ticket["assigned_user_id"], requester.user_id, requester.role),
+                )
+
+                code = ticket["ticket_code"]
+                content = read_bitacora_markdown(code)
+
+            return {
+                "ticket_code": code,
+                "uri": f"bitacoras/{code}.md",
+                "content": content,
+            }
+        except psycopg.Error as exc:
+            raise _translate_pg_error(exc, step=current_step) from exc
+
+    def save_bitacora(
+        self,
+        ticket_code: str,
+        payload: BitacoraUpdate,
+        requester: AuthenticatedUser,
+    ) -> Dict[str, Any]:
+        current_step = "init_transaction"
+        try:
+            with get_db_connection() as conn:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        current_step = "fn_lock_ticket_by_code"
+                        cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
+                        locked = cur.fetchone()
+
+                        current_step = "fn_assert_ticket_access"
+                        cur.execute(
+                            "SELECT fn_assert_ticket_access(%s, %s, %s)",
+                            (locked["assigned_user_id"], requester.user_id, requester.role),
+                        )
+
+                        current_step = "fn_insert_audit"
+                        cur.execute(
+                            "SELECT fn_insert_audit(%s, 'BITACORA_UPDATED', NULL, %s, %s)",
+                            (
+                                locked["ticket_id"],
+                                json.dumps({"bytes": len(payload.content.encode("utf-8"))}),
+                                requester.username,
+                            ),
+                        )
+
+                        current_step = "write_bitacora_markdown"
+                        uri = write_bitacora_markdown(locked["ticket_code"], payload.content)
+
+                return {
+                    "ticket_code": locked["ticket_code"],
+                    "uri": uri,
+                    "updated_by": requester.username,
+                }
+        except psycopg.Error as exc:
+            raise _translate_pg_error(exc, step=current_step) from exc
+        except OSError as exc:
+            raise RepositoryError(
+                message=f"No se pudo guardar el archivo Markdown de bitácora: {exc}",
+                step=current_step,
+                status_code=500,
+            ) from exc
 
 
 def get_ticket_repository() -> AbstractTicketRepository:

@@ -11,8 +11,10 @@ venv/
 env/
 .pytest_cache/
 
-# Datos persistentes de contenedores (cuando se montan localmente)
+# Datos persistentes de contenedores y bitácoras generadas localmente
 .postgres_data/
+bitacoras/*.md
+!bitacoras/.gitkeep
 
 # Archivos temporales del sistema e IDE
 .DS_Store

@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, Query
 from app.repositories import AbstractTicketRepository, get_ticket_repository
 from app.schemas import (
     AuthenticatedUser,
+    BitacoraUpdate,
     EmailWebhookPayload,
     TicketAssignUpdate,
     TicketCreate,
@@ -113,3 +114,24 @@ def add_work_log(
 ):
     """Registra una sesión de trabajo en el ticket vinculada al usuario autenticado."""
     return repo.add_work_log(ticket_code, payload, requester=current_user)
+
+
+@router.get("/{ticket_code}/bitacora")
+def get_ticket_bitacora(
+    ticket_code: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    repo: AbstractTicketRepository = Depends(get_ticket_repository),
+):
+    """Obtiene el contenido Markdown de la bitácora tras verificar permisos sobre el ticket."""
+    return repo.get_bitacora(ticket_code, requester=current_user)
+
+
+@router.put("/{ticket_code}/bitacora")
+def update_ticket_bitacora(
+    ticket_code: str,
+    payload: BitacoraUpdate,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    repo: AbstractTicketRepository = Depends(get_ticket_repository),
+):
+    """Guarda el contenido Markdown de la bitácora y registra el evento en auditoría."""
+    return repo.save_bitacora(ticket_code, payload, requester=current_user)
