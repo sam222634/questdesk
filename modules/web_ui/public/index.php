@@ -274,6 +274,9 @@ if (isset($_GET['api'])) {
           </div>
 
           <div class="detail-meta-bar" id="detailMetaBar"></div>
+          <div class="notice" id="readOnlyNotice" role="status" style="display:none;">
+            Solo lectura: este ticket está asignado a otro usuario. Únicamente su responsable puede modificarlo.
+          </div>
 
           <div class="tabs-bar">
             <button type="button" class="tab-btn active" data-tab="tabBitacora">Bitácora Markdown (.md)</button>
@@ -365,7 +368,7 @@ if (isset($_GET['api'])) {
             <input type="number" id="estimated_points" min="1" max="10" value="2" />
           </div>
           <div>
-            <label for="newTicketAssignee">Responsable inicial</label>
+            <label for="newTicketAssignee" id="newTicketAssigneeLabel">Responsable</label>
             <select id="newTicketAssignee"></select>
           </div>
         </div>

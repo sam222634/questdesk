@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import json
 import psycopg
+from app.config import settings
 from app.database import get_db_connection
 from app.markdown_gen import (
     generate_bitacora_markdown,
@@ -32,6 +33,15 @@ _INTERNAL_TICKET_KEYS = {"id", "assigned_user_id", "assignee_manager_id", "queue
 
 def _sanitize_ticket_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in row.items() if k not in _INTERNAL_TICKET_KEYS}
+
+
+def _is_enterprise() -> bool:
+    return settings.questdesk_mode.lower() != "personal"
+
+
+def _with_permissions(row: Dict[str, Any], requester: AuthenticatedUser) -> Dict[str, Any]:
+    can_edit = requester.role.upper() == "ADMIN" or row.get("assigned_user_id") == requester.user_id
+    return {**_sanitize_ticket_row(row), "can_edit": can_edit}
 
 
 def _translate_pg_error(exc: psycopg.Error, step: str) -> RepositoryError:
@@ -97,7 +107,18 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 )
             users = cur.fetchall()
 
-        return {"queues": queues, "statuses": statuses, "priorities": priorities, "users": users}
+        enterprise = _is_enterprise()
+        if enterprise:
+            users = [u for u in users if u["user_uuid"] != requester.user_uuid]
+        can_create = bool(users) if enterprise else True
+        return {
+            "queues": queues,
+            "statuses": statuses,
+            "priorities": priorities,
+            "users": users,
+            "mode": "enterprise" if enterprise else "personal",
+            "can_create": can_create,
+        }
 
     def list_tickets(
         self,
@@ -132,7 +153,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
         """
         with get_db_connection() as conn, conn.cursor() as cur:
             cur.execute(query, params)
-            return [_sanitize_ticket_row(r) for r in cur.fetchall()]
+            return [_with_permissions(r, requester) for r in cur.fetchall()]
 
     def get_ticket_detail(self, ticket_code: str, requester: AuthenticatedUser) -> Dict[str, Any]:
         current_step = "get_ticket_detail"
@@ -178,7 +199,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 audit_logs = cur.fetchall()
 
             return {
-                **_sanitize_ticket_row(ticket),
+                **_with_permissions(ticket, requester),
                 "source": source,
                 "documents": documents,
                 "work_logs": work_logs,
@@ -196,6 +217,14 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         if payload.message_id:
                             current_step = "fn_assert_unique_message_id"
                             cur.execute("SELECT fn_assert_unique_message_id(%s)", (payload.message_id,))
+
+                        if _is_enterprise() and (
+                            not payload.assignee_uuid or str(payload.assignee_uuid) == str(requester.user_uuid)
+                        ):
+                            raise ForbiddenError(
+                                "En modo empresa el ticket debe asignarse a otro usuario; no se permite autoasignación.",
+                                step="check_self_assignment",
+                            )
 
                         assigned_user_id = requester.user_id
                         assigned_user_uuid = str(requester.user_uuid)
@@ -222,7 +251,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         prio = cur.fetchone()
 
                         current_step = "fn_get_status"
-                        cur.execute("SELECT * FROM fn_get_status('NEW')")
+                        cur.execute("SELECT * FROM fn_get_status('ASSIGNED')")
                         status = cur.fetchone()
 
                         current_step = "fn_reserve_queue_folio"
@@ -330,9 +359,9 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
                         locked = cur.fetchone()
 
-                        current_step = "fn_assert_ticket_access"
+                        current_step = "fn_assert_ticket_write"
                         cur.execute(
-                            "SELECT fn_assert_ticket_access(%s, %s, %s)",
+                            "SELECT fn_assert_ticket_write(%s, %s, %s)",
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 
@@ -401,9 +430,9 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
                         locked = cur.fetchone()
 
-                        current_step = "fn_assert_ticket_access"
+                        current_step = "fn_assert_ticket_write"
                         cur.execute(
-                            "SELECT fn_assert_ticket_access(%s, %s, %s)",
+                            "SELECT fn_assert_ticket_write(%s, %s, %s)",
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 
@@ -421,6 +450,23 @@ class PostgresTicketRepository(AbstractTicketRepository):
                                 step="check_delegation_hierarchy",
                             )
 
+                        if target_user["user_id"] == locked["assigned_user_id"]:
+                            raise ValidationError(
+                                "El ticket ya está asignado a ese usuario.",
+                                step="check_same_assignee",
+                            )
+                        if _is_enterprise() and target_user["user_id"] == requester.user_id:
+                            raise ForbiddenError(
+                                "En modo empresa no se permite autoasignarse tickets.",
+                                step="check_self_assignment",
+                            )
+
+                        current_step = "fn_mark_ticket_assigned"
+                        cur.execute("SELECT fn_mark_ticket_assigned(%s)", (locked["ticket_id"],))
+
+                        current_step = "fn_close_open_work_logs"
+                        cur.execute("SELECT fn_close_open_work_logs(%s)", (locked["ticket_id"],))
+
                         current_step = "fn_set_ticket_assignee"
                         cur.execute(
                             "SELECT fn_set_ticket_assignee(%s, %s)",
@@ -432,9 +478,10 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             "SELECT fn_insert_audit(%s, 'ASSIGNED', %s, %s, %s)",
                             (
                                 locked["ticket_id"],
-                                json.dumps({"previous_assignee": True}),
+                                json.dumps({"status": locked["current_status"]}),
                                 json.dumps(
                                     {
+                                        "status": "ASSIGNED",
                                         "assignee_uuid": str(target_user["user_uuid"]),
                                         "assignee_username": target_user["username"],
                                         "notes": payload.notes,
@@ -444,6 +491,9 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             ),
                         )
 
+                        current_step = "update_bitacora_status"
+                        update_bitacora_status(locked["ticket_code"], "ASSIGNED")
+
                 return {
                     "ticket_code": locked["ticket_code"],
                     "delegated_by": requester.username,
@@ -452,6 +502,12 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 }
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
+        except OSError as exc:
+            raise RepositoryError(
+                message=f"No se pudo actualizar el estado en el archivo Markdown: {exc}",
+                step=current_step,
+                status_code=500,
+            ) from exc
 
     def add_work_log(
         self,
@@ -468,9 +524,9 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
                         locked = cur.fetchone()
 
-                        current_step = "fn_assert_ticket_access"
+                        current_step = "fn_assert_ticket_write"
                         cur.execute(
-                            "SELECT fn_assert_ticket_access(%s, %s, %s)",
+                            "SELECT fn_assert_ticket_write(%s, %s, %s)",
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 
@@ -550,9 +606,9 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         cur.execute("SELECT * FROM fn_lock_ticket_by_code(%s)", (ticket_code,))
                         locked = cur.fetchone()
 
-                        current_step = "fn_assert_ticket_access"
+                        current_step = "fn_assert_ticket_write"
                         cur.execute(
-                            "SELECT fn_assert_ticket_access(%s, %s, %s)",
+                            "SELECT fn_assert_ticket_write(%s, %s, %s)",
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 

@@ -32,6 +32,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-tickets_admin}:${POSTGRES_PASSWORD:-tickets_local_dev}@db:5432/${POSTGRES_DB:-tickets_core}
       BITACORAS_DIR: /data/bitacoras
+      QUESTDESK_MODE: ${QUESTDESK_MODE:-enterprise}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:

@@ -163,7 +163,12 @@ async function loadCatalogs() {
     `<option value="${escapeHtml(u.user_uuid)}">${escapeHtml(u.display_name)} (${escapeHtml(u.username)} - ${escapeHtml(u.role)})</option>`
   ).join('');
   delegateSelect.innerHTML = userOptions;
-  newAssignee.innerHTML = '<option value="">Asignar a mi usuario actual</option>' + userOptions;
+  const enterprise = catalogs.mode !== 'personal';
+  newAssignee.required = enterprise;
+  newAssignee.innerHTML = enterprise
+    ? '<option value="" disabled selected>Selecciona un responsable</option>' + userOptions
+    : '<option value="">Asignarme a mí</option>' + userOptions;
+  document.getElementById('btnOpenNewTicket').style.display = catalogs.can_create ? '' : 'none';
 }
 
 function updateDashboardKPIs(tickets) {
@@ -207,7 +212,13 @@ function updateDashboardKPIs(tickets) {
 
 function renderTicketsTable() {
   const search = document.getElementById('filterSearch').value.trim().toLowerCase();
+  const includeClosed = document.getElementById('showClosed').checked;
+  const queueFilter = document.getElementById('filterQueue').value;
+  const statusFilter = document.getElementById('filterStatus').value;
   const filtered = allTickets.filter(t => {
+    if (statusFilter && t.status_name !== statusFilter) return false;
+    if (!statusFilter && !includeClosed && t.is_closed) return false;
+    if (queueFilter && t.queue_slug !== queueFilter) return false;
     if (!search) return true;
     return (
       String(t.ticket_code).toLowerCase().includes(search) ||
@@ -242,15 +253,7 @@ function renderTicketsTable() {
 }
 
 async function loadTickets() {
-  const includeClosed = document.getElementById('showClosed').checked;
-  const queue = document.getElementById('filterQueue').value;
-  const status = document.getElementById('filterStatus').value;
-
-  const params = new URLSearchParams({ include_closed: String(includeClosed) });
-  if (queue) params.set('queue', queue);
-  if (status) params.set('status', status);
-
-  const res = await fetch(`/?api=/tickets&${params.toString()}`);
+  const res = await fetch('/?api=/tickets&include_closed=true');
   const data = await res.json().catch(() => []);
   if (!res.ok) {
     if (res.status === 401) {
@@ -302,12 +305,23 @@ async function selectTicket(code, switchTabToBitacora = false) {
   document.getElementById('detailMetaBar').textContent =
     `Área: ${detail.queue_name} · Responsable: ${detail.assignee_display_name} (${detail.assignee_username}) · Esfuerzo: ${detail.estimated_points} pts · Tiempo acumulado: ${detail.total_minutes} min`;
 
+  const canEdit = detail.can_edit === true;
+  document.getElementById('readOnlyNotice').style.display = canEdit ? 'none' : 'block';
+  ['formChangeStatus', 'formDelegateTicket', 'formAddWorkLog'].forEach(id => {
+    document.getElementById(id).querySelectorAll('input, select, button').forEach(el => { el.disabled = !canEdit; });
+  });
+  document.getElementById('btnSaveBitacora').disabled = !canEdit;
+  document.getElementById('bitacoraEditor').readOnly = !canEdit;
+  if (canEdit && !document.getElementById('delegateUserSelect').options.length) {
+    document.getElementById('formDelegateTicket').querySelectorAll('input, select, button').forEach(el => { el.disabled = true; });
+  }
+
   const quickActions = document.getElementById('quickStatusActions');
   quickActions.innerHTML = '';
-  if (detail.status_name !== 'IN_PROGRESS' && !detail.is_closed) {
+  if (canEdit && detail.status_name !== 'IN_PROGRESS' && !detail.is_closed) {
     quickActions.innerHTML += `<button type="button" class="secondary" data-quick-status="IN_PROGRESS">Iniciar Foco</button> `;
   }
-  if (!detail.is_closed) {
+  if (canEdit && !detail.is_closed) {
     quickActions.innerHTML += `<button type="button" class="secondary" data-quick-status="RESOLVED">Resolver</button>`;
   }
 
@@ -480,9 +494,9 @@ document.getElementById('btnCloseNewTicket').addEventListener('click', () => {
 document.getElementById('ticketForm').addEventListener('submit', createTicket);
 
 document.getElementById('filterSearch').addEventListener('input', renderTicketsTable);
-document.getElementById('filterQueue').addEventListener('change', loadTickets);
-document.getElementById('filterStatus').addEventListener('change', loadTickets);
-document.getElementById('showClosed').addEventListener('change', loadTickets);
+document.getElementById('filterQueue').addEventListener('change', renderTicketsTable);
+document.getElementById('filterStatus').addEventListener('change', renderTicketsTable);
+document.getElementById('showClosed').addEventListener('change', renderTicketsTable);
 
 document.getElementById('ticketsTableBody').addEventListener('click', (e) => {
   const row = e.target.closest('tr[data-ticket-code]');

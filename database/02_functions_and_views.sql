@@ -438,3 +438,47 @@ BEGIN
               ticket_work_logs.ended_at, ticket_work_logs.duration_minutes, ticket_work_logs.notes;
 END;
 $$ LANGUAGE plpgsql;
+
+-- 3.6 Verificar permiso de escritura: solo el responsable actual (o ADMIN) puede modificar
+CREATE OR REPLACE FUNCTION fn_assert_ticket_write(
+    p_ticket_assigned_user_id INT,
+    p_requester_id INT,
+    p_requester_role VARCHAR(20)
+)
+RETURNS VOID AS $$
+BEGIN
+    IF UPPER(p_requester_role) = 'ADMIN' OR p_ticket_assigned_user_id = p_requester_id THEN
+        RETURN;
+    END IF;
+    RAISE EXCEPTION 'Ticket en modo solo lectura: unicamente el responsable actual puede modificarlo.'
+        USING ERRCODE = 'insufficient_privilege';
+END;
+$$ LANGUAGE plpgsql;
+
+-- 3.7 Pasar el ticket a ASSIGNED al asignarlo (rechaza tickets cerrados)
+CREATE OR REPLACE FUNCTION fn_mark_ticket_assigned(p_ticket_id BIGINT)
+RETURNS VOID AS $$
+DECLARE
+    v_closed BOOLEAN;
+BEGIN
+    SELECT s.is_closed INTO v_closed
+    FROM tickets t JOIN ticket_statuses s ON s.id = t.status_id
+    WHERE t.id = p_ticket_id;
+
+    IF v_closed THEN
+        RAISE EXCEPTION 'No se puede asignar un ticket resuelto o cerrado.' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    UPDATE tickets
+    SET status_id = (SELECT id FROM ticket_statuses WHERE name = 'ASSIGNED')
+    WHERE id = p_ticket_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 3.8 Cerrar sesiones de trabajo abiertas (al cambiar de responsable)
+CREATE OR REPLACE FUNCTION fn_close_open_work_logs(p_ticket_id BIGINT)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE ticket_work_logs SET ended_at = NOW() WHERE ticket_id = p_ticket_id AND ended_at IS NULL;
+END;
+$$ LANGUAGE plpgsql;

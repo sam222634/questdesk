@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     default_api_key: str = "questdesk-local-dev-key"
     app_title: str = "QuestDesk - Core Ticketing Service"
     app_version: str = "0.2.0"
+    questdesk_mode: str = "enterprise"
 
 
 settings = Settings()

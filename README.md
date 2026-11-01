@@ -26,3 +26,11 @@ Sistema de código abierto diseñado bajo una arquitectura modular orientada a e
 ## Licencia
 
 Distribuido bajo la licencia **Apache 2.0**. Consulta el archivo [LICENSE](./LICENSE) para más detalles.
+
+## Reglas de negocio de tickets
+
+- `QUESTDESK_MODE=enterprise` (por defecto): todo ticket se crea asignado a otro usuario; no existe autoasignación. Un usuario sin subordinados (AGENT) no puede crear tickets.
+- `QUESTDESK_MODE=personal`: el usuario puede crearse tickets a sí mismo.
+- Al asignar o reasignar, el ticket pasa de `NEW` a `ASSIGNED` y se cierran las sesiones de tiempo abiertas del responsable anterior. No se pueden asignar tickets resueltos o cerrados.
+- Solo el responsable actual (o ADMIN) modifica estado, tiempo, bitácora y delegación. Quien delegó conserva acceso de solo lectura (`can_edit: false`).
+- Los KPIs del dashboard se calculan sobre todos los tickets autorizados; el interruptor "Incluir resueltos y cerrados" solo filtra la tabla.
