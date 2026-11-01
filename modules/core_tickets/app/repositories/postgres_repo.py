@@ -5,10 +5,13 @@ import psycopg
 from app.config import settings
 from app.database import get_db_connection
 from app.markdown_gen import (
+    BitacoraValidationError,
+    apply_section_update,
+    parse_bitacora_sections,
+    write_bitacora_atomic,
     generate_bitacora_markdown,
     read_bitacora_markdown,
     update_bitacora_status,
-    write_bitacora_markdown,
 )
 from app.repositories.base import (
     AbstractTicketRepository,
@@ -21,7 +24,7 @@ from app.repositories.base import (
 )
 from app.schemas import (
     AuthenticatedUser,
-    BitacoraUpdate,
+    BitacoraSectionUpdate,
     TicketAssignUpdate,
     TicketCreate,
     TicketStatusUpdate,
@@ -174,6 +177,9 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 )
 
                 tid = ticket["id"]
+                cur.execute("SELECT user_uuid, username, display_name FROM fn_get_last_delegator(%s)", (tid,))
+                last_delegator = cur.fetchone()
+
                 cur.execute(
                     "SELECT channel, sender_email, message_id, raw_headers, created_at FROM ticket_sources WHERE ticket_id = %s",
                     (tid,),
@@ -204,6 +210,7 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 "documents": documents,
                 "work_logs": work_logs,
                 "audit_logs": audit_logs,
+                "last_delegator": last_delegator,
             }
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
@@ -440,13 +447,18 @@ class PostgresTicketRepository(AbstractTicketRepository):
                         cur.execute("SELECT * FROM fn_get_user_by_uuid(%s)", (payload.target_user_uuid,))
                         target_user = cur.fetchone()
 
+                        current_step = "fn_get_last_delegator"
+                        cur.execute("SELECT user_id FROM fn_get_last_delegator(%s)", (locked["ticket_id"],))
+                        delegator = cur.fetchone()
+                        is_return_to_delegator = bool(delegator) and delegator["user_id"] == target_user["user_id"]
                         if (
                             requester.role.upper() != "ADMIN"
                             and target_user["user_id"] != requester.user_id
                             and target_user["manager_id"] != requester.user_id
+                            and not is_return_to_delegator
                         ):
                             raise ForbiddenError(
-                                "Solo puedes delegar tickets a tus subordinados directos.",
+                                "Solo puedes delegar a tus subordinados directos o devolver el ticket a quien te lo delegó.",
                                 step="check_delegation_hierarchy",
                             )
 
@@ -581,12 +593,12 @@ class PostgresTicketRepository(AbstractTicketRepository):
                 )
 
                 code = ticket["ticket_code"]
-                content = read_bitacora_markdown(code)
+                sections = parse_bitacora_sections(read_bitacora_markdown(code))
 
             return {
                 "ticket_code": code,
                 "uri": f"bitacoras/{code}.md",
-                "content": content,
+                "sections": sections,
             }
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
@@ -594,7 +606,8 @@ class PostgresTicketRepository(AbstractTicketRepository):
     def save_bitacora(
         self,
         ticket_code: str,
-        payload: BitacoraUpdate,
+        section_key: str,
+        payload: BitacoraSectionUpdate,
         requester: AuthenticatedUser,
     ) -> Dict[str, Any]:
         current_step = "init_transaction"
@@ -612,24 +625,41 @@ class PostgresTicketRepository(AbstractTicketRepository):
                             (locked["assigned_user_id"], requester.user_id, requester.role),
                         )
 
+                        current_step = "validate_bitacora_section"
+                        new_text = apply_section_update(
+                            read_bitacora_markdown(locked["ticket_code"]),
+                            section_key,
+                            payload.content,
+                            payload.mode,
+                        )
+
                         current_step = "fn_insert_audit"
                         cur.execute(
                             "SELECT fn_insert_audit(%s, 'BITACORA_UPDATED', NULL, %s, %s)",
                             (
                                 locked["ticket_id"],
-                                json.dumps({"bytes": len(payload.content.encode("utf-8"))}),
+                                json.dumps(
+                                    {
+                                        "section": section_key,
+                                        "mode": payload.mode,
+                                        "bytes": len(payload.content.encode("utf-8")),
+                                    }
+                                ),
                                 requester.username,
                             ),
                         )
 
                         current_step = "write_bitacora_markdown"
-                        uri = write_bitacora_markdown(locked["ticket_code"], payload.content)
+                        uri = write_bitacora_atomic(locked["ticket_code"], new_text)
 
                 return {
                     "ticket_code": locked["ticket_code"],
                     "uri": uri,
+                    "section": section_key,
                     "updated_by": requester.username,
                 }
+        except BitacoraValidationError as exc:
+            raise ValidationError(str(exc), step=current_step) from exc
         except psycopg.Error as exc:
             raise _translate_pg_error(exc, step=current_step) from exc
         except OSError as exc:

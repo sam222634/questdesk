@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from app.schemas import (
     AuthenticatedUser,
-    BitacoraUpdate,
+    BitacoraSectionUpdate,
     TicketAssignUpdate,
     TicketCreate,
     TicketStatusUpdate,
@@ -109,7 +109,8 @@ class AbstractTicketRepository(ABC):
     def save_bitacora(
         self,
         ticket_code: str,
-        payload: BitacoraUpdate,
+        section_key: str,
+        payload: BitacoraSectionUpdate,
         requester: AuthenticatedUser,
     ) -> Dict[str, Any]:
         raise NotImplementedError

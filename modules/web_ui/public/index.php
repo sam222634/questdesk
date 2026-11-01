@@ -1,6 +1,10 @@
 <?php
 declare(strict_types=1);
 
+header("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: no-referrer');
+
 session_start([
     'cookie_httponly' => true,
     'cookie_samesite' => 'Strict',
@@ -287,14 +291,8 @@ if (isset($_GET['api'])) {
           <div id="tabBitacora" class="tab-pane active">
             <div class="md-toolbar">
               <span id="bitacoraPathLabel" class="code-path"></span>
-              <div class="md-mode-buttons">
-                <button type="button" id="btnMdEditMode" class="secondary active">Editar Markdown</button>
-                <button type="button" id="btnMdPreviewMode" class="secondary">Vista Previa</button>
-                <button type="button" id="btnSaveBitacora" class="btn-primary">Guardar Bitácora</button>
-              </div>
             </div>
-            <textarea id="bitacoraEditor" class="md-editor" rows="16" placeholder="Contenido Markdown de la bitácora..."></textarea>
-            <div id="bitacoraPreview" class="md-preview" style="display:none;"></div>
+            <div id="bitacoraSections"></div>
           </div>
 
           <div id="tabManage" class="tab-pane" style="display:none;">

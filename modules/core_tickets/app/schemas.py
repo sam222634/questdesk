@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Literal, Any, Dict, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field
 
@@ -56,5 +56,6 @@ class WorkLogCreate(BaseModel):
     notes: Optional[str] = None
 
 
-class BitacoraUpdate(BaseModel):
-    content: str = Field(..., min_length=1, description="Contenido Markdown completo de la bitácora")
+class BitacoraSectionUpdate(BaseModel):
+    content: str = Field(..., max_length=20000, description="Texto Markdown del bloque (sin HTML ni encabezados nivel 1-2)")
+    mode: Literal["replace", "append"] = Field(default="replace", description="Reemplazar el bloque o agregar al final")

@@ -482,3 +482,17 @@ BEGIN
     UPDATE ticket_work_logs SET ended_at = NOW() WHERE ticket_id = p_ticket_id AND ended_at IS NULL;
 END;
 $$ LANGUAGE plpgsql;
+
+-- 3.9 Ultimo usuario que creo o asigno el ticket (para devolverlo a quien lo delego)
+CREATE OR REPLACE FUNCTION fn_get_last_delegator(p_ticket_id BIGINT)
+RETURNS TABLE (user_id INT, user_uuid UUID, username VARCHAR, display_name VARCHAR) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT u.id, u.user_uuid, u.username, u.display_name
+    FROM ticket_audit_log a
+    JOIN users u ON u.username = a.actor
+    WHERE a.ticket_id = p_ticket_id AND a.action IN ('CREATED', 'ASSIGNED')
+    ORDER BY a.created_at DESC, a.id DESC
+    LIMIT 1;
+END;
+$$ LANGUAGE plpgsql;

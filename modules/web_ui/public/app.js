@@ -310,10 +310,17 @@ async function selectTicket(code, switchTabToBitacora = false) {
   ['formChangeStatus', 'formDelegateTicket', 'formAddWorkLog'].forEach(id => {
     document.getElementById(id).querySelectorAll('input, select, button').forEach(el => { el.disabled = !canEdit; });
   });
-  document.getElementById('btnSaveBitacora').disabled = !canEdit;
-  document.getElementById('bitacoraEditor').readOnly = !canEdit;
-  if (canEdit && !document.getElementById('delegateUserSelect').options.length) {
-    document.getElementById('formDelegateTicket').querySelectorAll('input, select, button').forEach(el => { el.disabled = true; });
+  if (canEdit) {
+    const delegateSelect = document.getElementById('delegateUserSelect');
+    const options = catalogs.users.map(u => ({ uuid: u.user_uuid, label: `${u.display_name} (${u.username} - ${u.role})` }));
+    const back = detail.last_delegator;
+    if (back && !options.some(o => o.uuid === back.user_uuid)) {
+      options.push({ uuid: back.user_uuid, label: `${back.display_name} (${back.username}) - quien me lo delegó` });
+    }
+    delegateSelect.innerHTML = options.map(o => `<option value="${escapeHtml(o.uuid)}">${escapeHtml(o.label)}</option>`).join('');
+    if (!options.length) {
+      document.getElementById('formDelegateTicket').querySelectorAll('input, select, button').forEach(el => { el.disabled = true; });
+    }
   }
 
   const quickActions = document.getElementById('quickStatusActions');
@@ -326,13 +333,9 @@ async function selectTicket(code, switchTabToBitacora = false) {
   }
 
   document.getElementById('manageStatusSelect').value = detail.status_name;
-  if (detail.assignee_uuid) {
-    document.getElementById('delegateUserSelect').value = detail.assignee_uuid;
-  }
 
   document.getElementById('bitacoraPathLabel').textContent = bitacora.uri || detail.bitacora_uri || '';
-  document.getElementById('bitacoraEditor').value = bitacora.content || '';
-  document.getElementById('bitacoraPreview').innerHTML = renderMarkdownPreview(bitacora.content || '');
+  renderBitacoraSections(bitacora.sections || [], canEdit);
 
   const workLogs = Array.isArray(detail.work_logs) ? detail.work_logs : [];
   document.getElementById('workLogsContainer').innerHTML = workLogs.length
@@ -359,18 +362,44 @@ async function selectTicket(code, switchTabToBitacora = false) {
   }
 }
 
-async function saveBitacora() {
+function renderBitacoraSections(sections, canEdit) {
+  const container = document.getElementById('bitacoraSections');
+  container.innerHTML = sections.map(s => {
+    const key = escapeHtml(s.key);
+    const editable = canEdit && s.editable;
+    const controls = editable ? `
+      <details class="section-edit">
+        <summary>Modificar bloque</summary>
+        <textarea class="md-editor" rows="8" maxlength="20000" data-section-text="${key}">${escapeHtml(s.content)}</textarea>
+        <button type="button" class="btn-primary" data-section-save="${key}" data-mode="replace">Guardar bloque</button>
+      </details>
+      <details class="section-edit">
+        <summary>Agregar al final</summary>
+        <textarea class="md-editor" rows="4" maxlength="20000" data-section-append="${key}" placeholder="Texto a agregar..."></textarea>
+        <button type="button" class="secondary" data-section-save="${key}" data-mode="append">Agregar</button>
+      </details>` : `<div class="subtitle">${s.editable ? 'Solo lectura.' : 'Bloque fijo, generado con el ticket.'}</div>`;
+    return `
+      <section class="subcard bitacora-section">
+        <h4>${Number(s.number)}. ${escapeHtml(s.title)}</h4>
+        <div class="md-preview">${renderMarkdownPreview(s.content)}</div>
+        ${controls}
+      </section>`;
+  }).join('');
+}
+
+async function saveBitacoraSection(key, mode) {
   if (!selectedTicketCode) return;
   showError(null);
-  const content = document.getElementById('bitacoraEditor').value;
-  const res = await fetch(`/?api=/tickets/${encodeURIComponent(selectedTicketCode)}/bitacora`, {
+  const selector = mode === 'append' ? `[data-section-append="${key}"]` : `[data-section-text="${key}"]`;
+  const content = document.querySelector(selector).value;
+  if (mode === 'append' && !content.trim()) return;
+  const res = await fetch(`/?api=/tickets/${encodeURIComponent(selectedTicketCode)}/bitacora/sections/${encodeURIComponent(key)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ content, mode })
   });
   if (res.ok) {
-    document.getElementById('bitacoraPreview').innerHTML = renderMarkdownPreview(content);
-    showNotice(`Bitácora ${selectedTicketCode}.md guardada y auditada.`);
+    showNotice(`Bloque guardado en ${selectedTicketCode}.md y auditado.`);
     await selectTicket(selectedTicketCode, false);
   } else {
     const err = await res.json().catch(() => ({}));
@@ -509,22 +538,12 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => activateTab(btn.dataset.tab));
 });
 
-document.getElementById('btnMdEditMode').addEventListener('click', () => {
-  document.getElementById('btnMdEditMode').classList.add('active');
-  document.getElementById('btnMdPreviewMode').classList.remove('active');
-  document.getElementById('bitacoraEditor').style.display = 'block';
-  document.getElementById('bitacoraPreview').style.display = 'none';
+document.getElementById('bitacoraSections').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-section-save]');
+  if (btn) {
+    saveBitacoraSection(btn.dataset.sectionSave, btn.dataset.mode);
+  }
 });
-
-document.getElementById('btnMdPreviewMode').addEventListener('click', () => {
-  document.getElementById('btnMdPreviewMode').classList.add('active');
-  document.getElementById('btnMdEditMode').classList.remove('active');
-  document.getElementById('bitacoraPreview').innerHTML = renderMarkdownPreview(document.getElementById('bitacoraEditor').value);
-  document.getElementById('bitacoraEditor').style.display = 'none';
-  document.getElementById('bitacoraPreview').style.display = 'block';
-});
-
-document.getElementById('btnSaveBitacora').addEventListener('click', saveBitacora);
 
 document.getElementById('quickStatusActions').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-quick-status]');

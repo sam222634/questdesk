@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query
 from app.repositories import AbstractTicketRepository, get_ticket_repository
 from app.schemas import (
     AuthenticatedUser,
-    BitacoraUpdate,
+    BitacoraSectionUpdate,
     EmailWebhookPayload,
     TicketAssignUpdate,
     TicketCreate,
@@ -126,12 +126,13 @@ def get_ticket_bitacora(
     return repo.get_bitacora(ticket_code, requester=current_user)
 
 
-@router.put("/{ticket_code}/bitacora")
-def update_ticket_bitacora(
+@router.put("/{ticket_code}/bitacora/sections/{section_key}")
+def update_ticket_bitacora_section(
     ticket_code: str,
-    payload: BitacoraUpdate,
+    section_key: str,
+    payload: BitacoraSectionUpdate,
     current_user: AuthenticatedUser = Depends(get_current_user),
     repo: AbstractTicketRepository = Depends(get_ticket_repository),
 ):
-    """Guarda el contenido Markdown de la bitácora y registra el evento en auditoría."""
-    return repo.save_bitacora(ticket_code, payload, requester=current_user)
+    """Modifica o agrega texto en un bloque editable de la bitácora y registra el evento en auditoría."""
+    return repo.save_bitacora(ticket_code, section_key, payload, requester=current_user)

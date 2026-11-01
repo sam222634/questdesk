@@ -545,3 +545,9 @@ button.secondary.active {
   grid-template-columns: 1fr 1fr;
   gap: 0.85rem;
 }
+
+.bitacora-section { margin-bottom: 0.75rem; }
+.section-edit { margin-top: 0.5rem; }
+.section-edit summary { cursor: pointer; font-weight: 600; }
+.section-edit textarea { margin: 0.5rem 0; }
+.bitacora-section .md-preview { min-height: 0; max-height: 260px; }
